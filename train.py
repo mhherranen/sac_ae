@@ -60,6 +60,7 @@ def parse_args():
     parser.add_argument('--decoder_weight_lambda', default=1e-7, type=float)
     parser.add_argument('--num_layers', default=4, type=int)
     parser.add_argument('--num_filters', default=32, type=int)
+    parser.add_argument('--att_mask_mode', default=None)
     # sac
     parser.add_argument('--discount', default=0.99, type=float)
     parser.add_argument('--init_temperature', default=0.1, type=float)
@@ -125,7 +126,8 @@ def make_agent(obs_shape, action_shape, args, device):
             decoder_latent_lambda=args.decoder_latent_lambda,
             decoder_weight_lambda=args.decoder_weight_lambda,
             num_layers=args.num_layers,
-            num_filters=args.num_filters
+            num_filters=args.num_filters,
+            att_mask_mode=args.att_mask_mode
         )
     else:
         assert 'agent is not supported: %s' % args.agent

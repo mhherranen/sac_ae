@@ -214,7 +214,8 @@ class SacAeAgent(object):
         decoder_latent_lambda=0.0,
         decoder_weight_lambda=0.0,
         num_layers=4,
-        num_filters=32
+        num_filters=32,
+        att_mask_mode=None
     ):
         self.device = device
         self.discount = discount
@@ -224,6 +225,9 @@ class SacAeAgent(object):
         self.critic_target_update_freq = critic_target_update_freq
         self.decoder_update_freq = decoder_update_freq
         self.decoder_latent_lambda = decoder_latent_lambda
+        self.att_mask_mode = att_mask_mode
+        if att_mask_mode is not None:
+            assert att_mask_mode == 'batch' or att_mask_mode == 'sample'
 
         self.actor = Actor(
             obs_shape, action_shape, hidden_dim, encoder_type,
@@ -324,18 +328,28 @@ class SacAeAgent(object):
             target_Q = reward + (not_done * self.discount * target_V)
 
         # get current Q estimates
+        if self.att_mask_mode is not None:
+            obs.requires_grad = True
         current_Q1, current_Q2 = self.critic(obs, action)
         critic_loss = F.mse_loss(current_Q1,
                                  target_Q) + F.mse_loss(current_Q2, target_Q)
         L.log('train_critic/loss', critic_loss, step)
 
-
         # Optimize the critic
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
+        if self.att_mask_mode is not None:
+            att_mask = torch.abs(obs.grad)
+            norm = att_mask.mean(dim=[1, 2, 3], keepdim=True) if self.att_mask_mode == 'sample' else att_mask.mean()
+            att_mask /= norm
+            obs.requires_grad = False
+            att_mask.requires_grad = False
+        else:
+            att_mask = None
         self.critic_optimizer.step()
 
         self.critic.log(L, step)
+        return att_mask
 
     def update_actor_and_alpha(self, obs, L, step):
         # detach encoder, so we don't update it with the actor loss
@@ -366,14 +380,17 @@ class SacAeAgent(object):
         alpha_loss.backward()
         self.log_alpha_optimizer.step()
 
-    def update_decoder(self, obs, target_obs, L, step):
+    def update_decoder(self, obs, target_obs, L, step, att_mask=None):
         h = self.critic.encoder(obs)
 
         if target_obs.dim() == 4:
             # preprocess images to be in [-0.5, 0.5] range
             target_obs = utils.preprocess_obs(target_obs)
         rec_obs = self.decoder(h)
-        rec_loss = F.mse_loss(target_obs, rec_obs)
+        if att_mask is not None:
+            rec_loss = (att_mask * (target_obs - rec_obs).pow(2)).mean()
+        else:
+            rec_loss = F.mse_loss(target_obs, rec_obs)
 
         # add L2 penalty on latent representation
         # see https://arxiv.org/pdf/1903.12436.pdf
@@ -395,7 +412,7 @@ class SacAeAgent(object):
 
         L.log('train/batch_reward', reward.mean(), step)
 
-        self.update_critic(obs, action, reward, next_obs, not_done, L, step)
+        att_mask = self.update_critic(obs, action, reward, next_obs, not_done, L, step)
 
         if step % self.actor_update_freq == 0:
             self.update_actor_and_alpha(obs, L, step)
@@ -413,7 +430,7 @@ class SacAeAgent(object):
             )
 
         if self.decoder is not None and step % self.decoder_update_freq == 0:
-            self.update_decoder(obs, obs, L, step)
+            self.update_decoder(obs, obs, L, step, att_mask=att_mask)
 
     def save(self, model_dir, step):
         torch.save(
